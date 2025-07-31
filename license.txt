@@ -1,0 +1,12 @@
+JShell License - Camresh Edition
+
+By installing this software, you agree to the following:
+
+1. You're cool with running experimental C++ on Windows.
+2. This JShell is built for learners, hackers, and legends — not crybabies.
+3. No warranties, no court drama. If it breaks, fix it or fork it.
+4. You're free to use it. Just don't pretend you made it.
+5. Share knowledge. Not binaries.
+
+Built with caffeine & C++ by Camresh - CNJMTechnologies INC
+https://cnjm-technologies-inc.vercel.app

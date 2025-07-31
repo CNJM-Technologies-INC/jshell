@@ -1,0 +1,34 @@
+JSHELL INSTALLATION NOTES
+=========================
+
+The jshell installer does NOT automatically modify your PATH environment variable.
+
+To use jshell from anywhere in your system:
+
+OPTION 1: Add to PATH manually
+------------------------------
+1. Open System Properties > Environment Variables
+2. Edit the "Path" variable (System or User)
+3. Add: C:\jshell
+4. Click OK and restart your command prompt
+
+OPTION 2: Use full path
+-----------------------
+Run jshell using the full path: C:\jshell\jshell.exe
+
+OPTION 3: Create batch file
+---------------------------
+Create a batch file in a directory that's already in PATH:
+@echo off
+C:\jshell\jshell.exe %*
+
+UNINSTALLATION
+--------------
+If you manually added C:\jshell to your PATH, remember to remove it manually before uninstalling.
+
+The uninstaller only removes:
+- Files in C:\jshell
+- Desktop and Start Menu shortcuts
+- Registry entries for Add/Remove Programs
+
+Your PATH variable will remain unchanged.
