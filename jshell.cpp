@@ -2185,15 +2185,14 @@ UninstallIcon "jshell-icon.ico"  ; Uninstaller icon
 BrandingText "By Camresh - CNJMTechnologies INC"
 !include LogicLib.nsh
 !include WinMessages.nsh
-!include StrFunc.nsh
-${StrContains}
-${StrRep}
 
 Page license
 Page directory
 Page instfiles
 
 LicenseData "license.txt"
+
+
 
 Section "install"
     ; Check if already installed
@@ -2209,6 +2208,7 @@ Section "install"
     File "jshell.exe"
     File "jshell-icon.ico"       ; Copy icon to installation directory
     File "license.txt"           ; Copy license to installation directory
+    File "INSTALLATION_NOTES.txt" ; Copy installation instructions
     WriteUninstaller "$INSTDIR\uninstall.exe"
     
     ; Create Start Menu folder and shortcuts with icon
@@ -2216,20 +2216,8 @@ Section "install"
     CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\jshell.exe" "" "$INSTDIR\jshell-icon.ico"
     CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\jshell.exe" "" "$INSTDIR\jshell-icon.ico"
     
-    ; Add to PATH environment variable (safe append approach)
-    ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH"
-    
-    ; Check if our directory is already in PATH
-    ${StrContains} $1 "$INSTDIR" "$0"
-    ${If} $1 == ""
-        ; Not found, safe to append
-        ${If} $0 != ""
-            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH" "$0;$INSTDIR"
-        ${Else}
-            WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH" "$INSTDIR"
-        ${EndIf}
-        SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-    ${EndIf}
+    ; NOTE: PATH is not automatically modified by this installer
+    ; Users can manually add C:\jshell to their PATH if desired
     
     ; Registry entries for Add/Remove Programs
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "DisplayName" "${APPNAME} - ${DESCRIPTION}"
@@ -2247,22 +2235,14 @@ Section "uninstall"
     RMDir "$SMPROGRAMS\${APPNAME}"
     Delete "$DESKTOP\${APPNAME}.lnk"
     
-    ; Remove from PATH environment variable
-    ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH"
-    ${StrContains} $1 "$INSTDIR" "$0"
-    ${If} $1 != ""
-        ; Remove our directory from PATH
-        ${StrRep} $2 "$0" ";$INSTDIR" ""
-        ${StrRep} $3 "$2" "$INSTDIR;" ""
-        ${StrRep} $4 "$3" "$INSTDIR" ""
-        WriteRegExpandStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "PATH" "$4"
-        SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000
-    ${EndIf}
+    ; NOTE: PATH is not modified by this installer
+    ; Users must manually remove C:\jshell from PATH if they added it
     
     ; Remove files
     Delete "$INSTDIR\jshell.exe"
     Delete "$INSTDIR\jshell-icon.ico"
     Delete "$INSTDIR\license.txt"
+    Delete "$INSTDIR\INSTALLATION_NOTES.txt"
     Delete "$INSTDIR\uninstall.exe"
     RMDir $INSTDIR
     
