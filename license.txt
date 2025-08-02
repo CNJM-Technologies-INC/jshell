@@ -1,7 +1,4 @@
-JShell License - Camresh Edition
-
-By installing this software, you agree to the following:
-
+ JShell License - Camresh Edition
 1. You're cool with running experimental C++ on Windows.
 2. This JShell is built for learners, hackers, and legends - not crybabies.
 3. No warranties, no court drama. If it breaks, fix it or fork it.

@@ -201,6 +201,9 @@ int kill_proc(ShellState&, std::span<const char*>);
 int jobs(ShellState&, std::span<const char*>);
 int fg(ShellState&, std::span<const char*>);
 int bg(ShellState&, std::span<const char*>);
+int code(ShellState&, std::span<const char*>);
+int edit(ShellState&, std::span<const char*>);
+int vi(ShellState&, std::span<const char*>);
 int version(ShellState&, std::span<const char*>);
 
 // --- Built-ins Table ---
@@ -238,6 +241,10 @@ const std::vector<Builtin> builtins = {
     {"jobs",    jobs,       "List active jobs", "jobs"},
     {"fg",      fg,         "Bring job to foreground", "fg [job_id]"},
     {"bg",      bg,         "Send job to background", "bg [job_id]"},
+    {"open",    code,       "Open applications/editors", "open [app] [path]"},
+    {"edit",    edit,       "Edit file with external editor", "edit <file>"},
+    {"vi",      vi,         "Vim-like built-in editor", "vi <file>"},
+    {"nano",    vi,         "Alias for vi", "nano <file>"},
     {"version", version,    "Show shell version", "version"},
 };
 
@@ -1980,15 +1987,579 @@ int bg(ShellState& state, std::span<const char*> args) {
     return 0;
 }
 
+int code(ShellState&, std::span<const char*> args) {
+    const Theme theme;
+    
+    // Application shortcuts and their common executable names
+    std::map<std::string, std::vector<std::string>> app_shortcuts = {
+        // Editors
+        {"vscode", {"code", "code-insiders"}},
+        {"vs", {"code", "code-insiders"}},
+        {"code", {"code"}},
+        {"code-insiders", {"code-insiders"}},
+        {"kiro", {"kiro", "Kiro"}},
+        {"notepad++", {"notepad++", "notepad++.exe"}},
+        {"npp", {"notepad++", "notepad++.exe"}},
+        {"sublime", {"sublime_text", "subl"}},
+        {"atom", {"atom"}},
+        {"vim", {"vim", "nvim", "gvim"}},
+        {"nano", {"nano"}},
+        {"notepad", {"notepad", "notepad.exe"}},
+        
+        // Browsers
+        {"chrome", {"chrome", "google-chrome", "chrome.exe"}},
+        {"firefox", {"firefox", "firefox.exe"}},
+        {"edge", {"msedge", "microsoftedge", "edge"}},
+        {"brave", {"brave", "brave-browser"}},
+        
+        // Development Tools
+        {"git", {"git"}},
+        {"node", {"node", "nodejs"}},
+        {"python", {"python", "python3", "py"}},
+        {"java", {"java"}},
+        {"javac", {"javac"}},
+        {"gcc", {"gcc", "g++"}},
+        {"make", {"make", "mingw32-make"}},
+        {"cmake", {"cmake"}},
+        
+        // System Tools
+        {"explorer", {"explorer", "explorer.exe"}},
+        {"cmd", {"cmd", "cmd.exe"}},
+        {"powershell", {"powershell", "pwsh"}},
+        {"pwsh", {"pwsh"}},
+        {"regedit", {"regedit", "regedit.exe"}},
+        {"taskmgr", {"taskmgr", "taskmgr.exe"}},
+        {"calc", {"calc", "calc.exe"}},
+        {"mspaint", {"mspaint", "mspaint.exe"}},
+        
+        // Media
+        {"vlc", {"vlc"}},
+        {"spotify", {"spotify"}},
+        {"discord", {"discord"}},
+        
+        // Office
+        {"word", {"winword", "word"}},
+        {"excel", {"excel"}},
+        {"powerpoint", {"powerpnt"}},
+        
+        // IDEs
+        {"visual-studio", {"devenv"}},
+        {"intellij", {"idea", "idea64"}},
+        {"eclipse", {"eclipse"}},
+        {"android-studio", {"studio", "studio64"}},
+    };
+    
+    std::string app_name;
+    std::string path = ".";
+    
+    if (args.size() == 1) {
+        // No arguments - try to open current directory in default editor
+        app_name = "vscode";  // Default to VS Code
+    } else if (args.size() == 2) {
+        // One argument - could be app name or path
+        std::string arg = args[1];
+        if (app_shortcuts.contains(arg)) {
+            app_name = arg;
+        } else {
+            // Assume it's a path, use default editor
+            app_name = "vscode";
+            path = expand_path(arg);
+        }
+    } else {
+        // Two or more arguments - first is app, rest is path/args
+        app_name = args[1];
+        if (args.size() > 2) {
+            path = expand_path(args[2]);
+        }
+    }
+    
+    // Special case: if path is "." and app is a system tool, don't pass path
+    bool pass_path = true;
+    std::vector<std::string> no_path_apps = {"taskmgr", "calc", "regedit", "mspaint", "cmd", "powershell", "pwsh"};
+    if (path == "." && std::find(no_path_apps.begin(), no_path_apps.end(), app_name) != no_path_apps.end()) {
+        pass_path = false;
+    }
+    
+    // Determine if app should be detached or visible
+    std::vector<std::string> interactive_apps = {"cmd", "powershell", "pwsh", "python", "node", "java"};
+    bool is_interactive = std::find(interactive_apps.begin(), interactive_apps.end(), app_name) != interactive_apps.end();
+    
+    // Try to find and launch the application
+    if (app_shortcuts.contains(app_name)) {
+        for (const auto& executable_name : app_shortcuts[app_name]) {
+            std::string executable = find_executable(executable_name);
+            if (!executable.empty()) {
+                std::string command;
+                if (pass_path && path != ".") {
+                    command = std::format("\"{}\" \"{}\"", executable, path);
+                } else if (pass_path) {
+                    command = std::format("\"{}\" .", executable);
+                } else {
+                    command = std::format("\"{}\"", executable);
+                }
+                
+                STARTUPINFOA si = { sizeof(si) };
+                PROCESS_INFORMATION pi = { 0 };
+                
+                DWORD creation_flags = is_interactive ? CREATE_NEW_CONSOLE : DETACHED_PROCESS;
+                
+                if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 
+                                 creation_flags, nullptr, nullptr, &si, &pi)) {
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    
+                    ColorGuard guard(theme.success_color);
+                    if (pass_path) {
+                        std::cout << std::format("Opened {} in {}\n", path, executable_name);
+                    } else {
+                        std::cout << std::format("Launched {}\n", executable_name);
+                    }
+                    return 0;
+                }
+            }
+        }
+        
+        ColorGuard guard(theme.error_color);
+        std::cerr << std::format("jshell: {} not found. Make sure it's installed and in PATH.\n", app_name);
+        return 1;
+    } else {
+        // Try to launch as direct executable name
+        std::string executable = find_executable(app_name);
+        if (!executable.empty()) {
+            std::string command;
+            if (args.size() > 2) {
+                // Pass all remaining arguments
+                command = std::format("\"{}\"", executable);
+                for (size_t i = 2; i < args.size(); ++i) {
+                    command += std::format(" \"{}\"", args[i]);
+                }
+            } else {
+                command = std::format("\"{}\"", executable);
+            }
+            
+            STARTUPINFOA si = { sizeof(si) };
+            PROCESS_INFORMATION pi = { 0 };
+            
+            DWORD creation_flags = is_interactive ? CREATE_NEW_CONSOLE : DETACHED_PROCESS;
+            
+            if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 
+                             creation_flags, nullptr, nullptr, &si, &pi)) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                
+                ColorGuard guard(theme.success_color);
+                std::cout << std::format("Launched {}\n", app_name);
+                return 0;
+            }
+        }
+        
+        ColorGuard guard(theme.error_color);
+        std::cerr << std::format("jshell: '{}' not found.\n", app_name);
+        std::cout << "\nSupported shortcuts:\n";
+        std::cout << "Editors: vscode, notepad++, sublime, atom, vim, notepad\n";
+        std::cout << "Browsers: chrome, firefox, edge, brave\n";
+        std::cout << "Tools: explorer, cmd, powershell, taskmgr, calc, regedit\n";
+        std::cout << "Dev: git, node, python, java, gcc, make, cmake\n";
+        std::cout << "Or use any executable name directly.\n";
+        return 1;
+    }
+}
+
+int edit(ShellState&, std::span<const char*> args) {
+    if (args.size() < 2) {
+        const Theme theme;
+        ColorGuard guard(theme.error_color);
+        std::cerr << "jshell: Usage: edit <filename>\n";
+        return 1;
+    }
+    
+    std::string filename = expand_path(args[1]);
+    const Theme theme;
+    
+    // Try external editors first (much more reliable)
+    std::vector<std::string> editors = {
+        "notepad",      // Always available on Windows
+        "notepad++",    // Popular editor
+        "code",         // VS Code
+        "vim",          // If available
+        "nano"          // If available
+    };
+    
+    for (const auto& editor : editors) {
+        std::string executable = find_executable(editor);
+        if (!executable.empty()) {
+            std::string command = std::format("\"{}\" \"{}\"", executable, filename);
+            
+            STARTUPINFOA si = { sizeof(si) };
+            PROCESS_INFORMATION pi = { 0 };
+            
+            // Create file if it doesn't exist to avoid permission issues
+            if (!fs::exists(filename)) {
+                std::ofstream create_file(filename);
+                if (!create_file) {
+                    ColorGuard error_guard(theme.error_color);
+                    std::cerr << std::format("Cannot create file: {}\n", filename);
+                    continue;
+                }
+            }
+            
+            // Launch and wait for editor to close
+            if (CreateProcessA(nullptr, command.data(), nullptr, nullptr, FALSE, 
+                             0, nullptr, nullptr, &si, &pi)) {
+                
+                ColorGuard guard(theme.success_color);
+                std::cout << std::format("Opening {} in {}...\n", filename, editor);
+                
+                // Wait for the editor to close
+                WaitForSingleObject(pi.hProcess, INFINITE);
+                
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                
+                std::cout << "Editor closed.\n";
+                return 0;
+            }
+        }
+    }
+    
+    // Fallback: Very simple built-in editor using standard input
+    ColorGuard guard(theme.warning_color);
+    std::cout << "No external editor found. Using simple built-in editor.\n";
+    std::cout << std::format("Editing: {}\n", filename);
+    
+    std::vector<std::string> lines;
+    bool file_exists = fs::exists(filename);
+    
+    // Load existing file
+    if (file_exists) {
+        std::ifstream file(filename);
+        std::string line;
+        while (std::getline(file, line)) {
+            lines.push_back(line);
+        }
+        std::cout << std::format("Loaded {} lines\n", lines.size());
+    } else {
+        std::cout << "Creating new file\n";
+    }
+    
+    std::cout << "\nSimple Editor - Commands:\n";
+    std::cout << "  SAVE  - Save file and exit\n";
+    std::cout << "  QUIT  - Exit without saving\n";
+    std::cout << "  LIST  - Show all lines\n";
+    std::cout << "  HELP  - Show this help\n";
+    std::cout << "\nEnter lines of text:\n\n";
+    
+    bool modified = false;
+    
+    while (true) {
+        std::cout << std::format("Line {}: ", lines.size() + 1);
+        
+        // Use simple standard input (no fancy line editing)
+        std::string input;
+        if (!std::getline(std::cin, input)) {
+            break; // EOF
+        }
+        
+        if (input == "SAVE") {
+            std::ofstream file(filename);
+            if (file) {
+                for (const auto& line : lines) {
+                    file << line << '\n';
+                }
+                ColorGuard save_guard(theme.success_color);
+                std::cout << std::format("Saved {} ({} lines)\n", filename, lines.size());
+            } else {
+                ColorGuard error_guard(theme.error_color);
+                std::cerr << std::format("Error: Cannot write to {}\n", filename);
+            }
+            break;
+        } else if (input == "QUIT") {
+            if (modified) {
+                std::cout << "File has unsaved changes. Type 'SAVE' to save first.\n";
+                continue;
+            }
+            std::cout << "Exiting without saving.\n";
+            break;
+        } else if (input == "LIST") {
+            std::cout << "\nFile contents:\n";
+            for (size_t i = 0; i < lines.size(); ++i) {
+                std::cout << std::format("{:3}: {}\n", i + 1, lines[i]);
+            }
+            std::cout << '\n';
+        } else if (input == "HELP") {
+            std::cout << "\nCommands:\n";
+            std::cout << "  SAVE  - Save file and exit\n";
+            std::cout << "  QUIT  - Exit without saving\n";
+            std::cout << "  LIST  - Show all lines\n";
+            std::cout << "  HELP  - Show this help\n\n";
+        } else {
+            // Add line to file
+            lines.push_back(input);
+            modified = true;
+        }
+    }
+    
+    return 0;
+}
+
+int vi(ShellState& state, std::span<const char*> args) {
+    if (args.size() < 2) {
+        const Theme theme;
+        ColorGuard guard(theme.error_color);
+        std::cerr << "jshell: Usage: vi <filename>\n";
+        return 1;
+    }
+    
+    std::string filename = expand_path(args[1]);
+    
+    // Add .txt extension if no extension provided
+    if (filename.find('.') == std::string::npos) {
+        filename += ".txt";
+    }
+    
+    const Theme theme;
+    
+    std::vector<std::string> lines;
+    bool file_exists = fs::exists(filename);
+    
+    // Load existing file
+    if (file_exists) {
+        std::ifstream file(filename);
+        if (file.is_open()) {
+            std::string line;
+            while (std::getline(file, line)) {
+                lines.push_back(line);
+            }
+            file.close();
+        }
+    }
+    
+    if (lines.empty()) {
+        lines.push_back(""); // At least one empty line
+    }
+    
+    // Don't clear screen - just show editor inline
+    std::cout << "\n";
+    ColorGuard header_guard(theme.prompt_color);
+    std::cout << R"(
+    ========================================
+    ||            VI EDITOR               ||
+    ========================================)" << '\n';
+    
+    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
+    std::cout << std::format("    File: {} ({} lines)\n", filename, lines.size());
+    
+    // Show file content with line numbers
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::cout << std::format("{:3}: {}\n", i + 1, lines[i]);
+    }
+    
+    std::cout << std::string(40, '-') << '\n';
+    std::cout << "Commands: (i)nsert, (e)dit line, (d)elete, (s)ave, (q)uit, (l)ist, (h)elp\n";
+    
+    bool modified = false;
+    size_t current_line = 0;
+    
+    while (true) {
+        std::cout << std::format("vi:{} ", current_line + 1);
+        std::string input;
+        if (!std::getline(std::cin, input) || input.empty()) {
+            continue;
+        }
+        
+        char command = std::tolower(input[0]);
+        
+        switch (command) {
+            case 'i': { // Insert mode at current position
+                std::cout << std::format("Insert at line {} (empty line to exit):\n", current_line + 1);
+                std::vector<std::string> new_lines;
+                while (true) {
+                    std::cout << "+ ";
+                    std::string line;
+                    if (!std::getline(std::cin, line)) break;
+                    if (line.empty()) break;
+                    new_lines.push_back(line);
+                }
+                
+                // Insert new lines at current position
+                lines.insert(lines.begin() + current_line, new_lines.begin(), new_lines.end());
+                current_line += new_lines.size();
+                modified = true;
+                
+                std::cout << std::format("Inserted {} lines.\n", new_lines.size());
+                break;
+            }
+            case 'e': { // Edit specific line
+                if (input.length() > 2) {
+                    // Parse line number from command like "e5"
+                    try {
+                        size_t line_num = std::stoul(input.substr(1)) - 1;
+                        if (line_num < lines.size()) {
+                            current_line = line_num;
+                            std::cout << std::format("Current: {}: {}\n", current_line + 1, lines[current_line]);
+                            std::cout << "New text: ";
+                            std::string new_text;
+                            if (std::getline(std::cin, new_text)) {
+                                lines[current_line] = new_text;
+                                modified = true;
+                                std::cout << "Line updated.\n";
+                            }
+                        } else {
+                            std::cout << "Invalid line number.\n";
+                        }
+                    } catch (...) {
+                        std::cout << "Usage: e<line_number> (e.g., e5)\n";
+                    }
+                } else {
+                    std::cout << std::format("Current: {}: {}\n", current_line + 1, lines[current_line]);
+                    std::cout << "New text: ";
+                    std::string new_text;
+                    if (std::getline(std::cin, new_text)) {
+                        lines[current_line] = new_text;
+                        modified = true;
+                        std::cout << "Line updated.\n";
+                    }
+                }
+                break;
+            }
+            case 'd': { // Delete line
+                if (input.length() > 1) {
+                    try {
+                        size_t line_num = std::stoul(input.substr(1)) - 1;
+                        if (line_num < lines.size()) {
+                            std::cout << std::format("Deleting: {}: {}\n", line_num + 1, lines[line_num]);
+                            lines.erase(lines.begin() + line_num);
+                            modified = true;
+                            if (current_line >= lines.size() && current_line > 0) {
+                                current_line = lines.size() - 1;
+                            }
+                        } else {
+                            std::cout << "Invalid line number.\n";
+                        }
+                    } catch (...) {
+                        std::cout << "Usage: d<line_number> (e.g., d5)\n";
+                    }
+                } else {
+                    if (current_line < lines.size()) {
+                        std::cout << std::format("Deleting: {}: {}\n", current_line + 1, lines[current_line]);
+                        lines.erase(lines.begin() + current_line);
+                        modified = true;
+                        if (current_line >= lines.size() && current_line > 0) {
+                            current_line = lines.size() - 1;
+                        }
+                    }
+                }
+                break;
+            }
+            case 'j': { // Move down
+                if (current_line < lines.size() - 1) {
+                    current_line++;
+                    std::cout << std::format("{}: {}\n", current_line + 1, lines[current_line]);
+                }
+                break;
+            }
+            case 'k': { // Move up
+                if (current_line > 0) {
+                    current_line--;
+                    std::cout << std::format("{}: {}\n", current_line + 1, lines[current_line]);
+                }
+                break;
+            }
+            case 'g': { // Go to line
+                if (input.length() > 1) {
+                    try {
+                        size_t line_num = std::stoul(input.substr(1)) - 1;
+                        if (line_num < lines.size()) {
+                            current_line = line_num;
+                            std::cout << std::format("{}: {}\n", current_line + 1, lines[current_line]);
+                        } else {
+                            std::cout << "Invalid line number.\n";
+                        }
+                    } catch (...) {
+                        std::cout << "Usage: g<line_number> (e.g., g5)\n";
+                    }
+                } else {
+                    current_line = 0; // Go to first line
+                    std::cout << std::format("{}: {}\n", current_line + 1, lines[current_line]);
+                }
+                break;
+            }
+            case 'l': { // List all lines
+                std::cout << "\n File contents:\n";
+                std::cout << std::string(50, '-') << '\n';
+                for (size_t i = 0; i < lines.size(); ++i) {
+                    char marker = (i == current_line) ? '>' : ' ';
+                    ColorGuard line_guard(i == current_line ? theme.success_color : theme.default_color);
+                    std::cout << std::format("{}{:3}: {}\n", marker, i + 1, lines[i]);
+                }
+                std::cout << std::string(50, '-') << '\n';
+                std::cout << std::format("Current line: {} of {}\n\n", current_line + 1, lines.size());
+                break;
+            }
+            case 's': { // Save
+                std::ofstream file(filename);
+                if (file) {
+                    for (const auto& line : lines) {
+                        file << line << '\n';
+                    }
+                    ColorGuard save_guard(theme.success_color);
+                    std::cout << std::format("Saved {} ({} lines)\n", filename, lines.size());
+                    modified = false;
+                } else {
+                    ColorGuard error_guard(theme.error_color);
+                    std::cerr << std::format("Error: Cannot write to {}\n", filename);
+                }
+                break;
+            }
+            case 'q': { // Quit
+                if (modified) {
+                    std::cout << "File has unsaved changes. Save first? (y/n): ";
+                    std::string confirm;
+                    if (std::getline(std::cin, confirm) && std::tolower(confirm[0]) == 'y') {
+                        std::ofstream file(filename);
+                        if (file) {
+                            for (const auto& line : lines) {
+                                file << line << '\n';
+                            }
+                            std::cout << "Saved and exiting.\n";
+                        }
+                    }
+                }
+                std::cout << "=== Vi Editor Closed ===\n\n";
+                return 0;
+            }
+            case 'h': { // Help
+                std::cout << "\nVi Editor Commands:\n";
+                std::cout << "  i       - Insert mode at current line\n";
+                std::cout << "  e[N]    - Edit line N (or current line)\n";
+                std::cout << "  d[N]    - Delete line N (or current line)\n";
+                std::cout << "  j       - Move down one line\n";
+                std::cout << "  k       - Move up one line\n";
+                std::cout << "  g[N]    - Go to line N (or first line)\n";
+                std::cout << "  l       - List all lines with current position\n";
+                std::cout << "  s       - Save file\n";
+                std::cout << "  q       - Quit (prompts to save if modified)\n";
+                std::cout << "  h       - Show this help\n\n";
+                break;
+            }
+            default:
+                std::cout << "Unknown command. Type 'h' for help.\n";
+                break;
+        }
+    }
+    
+    return 0;
+}
+
 int version(ShellState&, std::span<const char*>) {
     const Theme theme;
     ColorGuard header_guard(theme.prompt_color);
-    std::cout << "jshell v2.0 - Enhanced C++ Shell for Windows\n";
+    std::cout << "jshell v0.0 - Enhanced C++ Shell for Windows\n";
     std::cout << "Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
     
     SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
     std::cout << "Built with: g++ (MinGW) C++20\n";
-    std::cout << "Copyright (c) 2024\n";
+    std::cout << "Copyright (c) future\n";
     std::cout << "Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
     
     return 0;
@@ -2133,13 +2704,36 @@ void shell_loop() {
 
     initialize_shell(state);
     
+    // Cool ASCII Art Banner
     if (state.config.enable_colors) {
         ColorGuard guard(theme.prompt_color);
-        std::cout << "jshell v0.0 - Enhanced C++ Shell for Windows\n";
-        std::cout << "Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
+        std::cout << R"(
+   __        _            _  _ 
+   \ \  ___ | |__    ___ | || |
+    \ \/ __|| '_ \  / _ \| || |
+ /\_/ /\__ \| | | ||  __/| || |
+ \___/ |___/|_| |_| \___||_||_|
+                               
+)" << '\n';
+        
+        SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
+        std::cout << "        Enhanced C++ Shell for Windows v2.0\n";
+        std::cout << "    Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
+        
+        ColorGuard feature_guard(theme.help_command_color);
+        std::cout << "\n  <Features: Job Control | Pipes | Redirection | Vi Editor >\n";
     } else {
-        std::cout << "jshell v0.0 - Enhanced C++ Shell for Windows\n";
-        std::cout << "Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
+        std::cout << R"(
+   __        _            _  _ 
+   \ \  ___ | |__    ___ | || |
+    \ \/ __|| '_ \  / _ \| || |
+ /\_/ /\__ \| | | ||  __/| || |
+ \___/ |___/|_| |_| \___||_||_|
+                               
+)" << '\n';
+        std::cout << "        Enhanced C++ Shell for Windows v2.0\n";
+        std::cout << "    Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
+        std::cout << "\n    Features: Job Control | Pipes | Redirection | Vi Editor\n";
     }
     std::cout << "Type 'help' for available commands.\n\n";
 

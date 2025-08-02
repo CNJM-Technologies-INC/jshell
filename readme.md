@@ -1,15 +1,25 @@
-# jshell 
+# jshell
 
+![jshell demo](https://github.com/CNJM-Technologies-INC/jshell/blob/main/jshell.png?raw=true)
 
-just clone and run 
-```g++ -o jshell jshell.cpp -std=c++20 -lstdc++fs -static-libgcc -static-libstdc++```
-then run
-```./jshell```
+## Build
 
-then to make an installer install NSIS
+```bash
+g++ -o jshell jshell.cpp -std=c++20 -lstdc++fs -static-libgcc -static-libstdc++
+./jshell
+```
 
-the write jshell --generate-nsis
+## Installer
 
-the use the NSIS app to load the .nsi file
+1. Install **NSIS**
+2. Run:
 
-should look like
+   ```bash
+   jshell --generate-nsis
+   ```
+
+3. Open the generated `.nsi` file with NSIS
+
+### Screenshot
+
+![NSIS installer](https://github.com/CNJM-Technologies-INC/jshell/blob/main/evidence.png?raw=true)
