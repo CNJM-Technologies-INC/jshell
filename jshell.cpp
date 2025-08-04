@@ -63,6 +63,21 @@ struct Job {
           is_running(true), is_stopped(false), job_id(id) {}
 };
 
+struct RegisteredCommand {
+    std::string name;
+    std::string template_cmd;
+    std::string description;
+    std::vector<std::string> param_names;
+    std::map<std::string, std::string> default_values;
+    
+    // Default constructor
+    RegisteredCommand() = default;
+    
+    // Parameterized constructor
+    RegisteredCommand(const std::string& n, const std::string& tmpl, const std::string& desc)
+        : name(n), template_cmd(tmpl), description(desc) {}
+};
+
 struct ShellState {
     std::vector<std::string> history;
     size_t history_index = 0;
@@ -74,6 +89,8 @@ struct ShellState {
     int last_exit_code = 0;
     Configuration config;
     fs::path shell_directory;
+    std::string previous_directory;
+    std::map<std::string, RegisteredCommand> registered_commands;
     
     ShellState() {
         char* appdata = nullptr;
@@ -204,6 +221,9 @@ int bg(ShellState&, std::span<const char*>);
 int code(ShellState&, std::span<const char*>);
 int edit(ShellState&, std::span<const char*>);
 int vi(ShellState&, std::span<const char*>);
+int register_cmd(ShellState&, std::span<const char*>);
+int unregister_cmd(ShellState&, std::span<const char*>);
+int list_registered(ShellState&, std::span<const char*>);
 int version(ShellState&, std::span<const char*>);
 
 // --- Built-ins Table ---
@@ -245,6 +265,9 @@ const std::vector<Builtin> builtins = {
     {"edit",    edit,       "Edit file with external editor", "edit <file>"},
     {"vi",      vi,         "Vim-like built-in editor", "vi <file>"},
     {"nano",    vi,         "Alias for vi", "nano <file>"},
+    {"register", register_cmd, "Register custom command", "register <name> <template> [description]"},
+    {"unreg",   unregister_cmd, "Unregister command", "unreg <name>"},
+    {"reglist", list_registered, "List registered commands", "reglist"},
     {"version", version,    "Show shell version", "version"},
 };
 
@@ -491,6 +514,60 @@ void load_history(ShellState& state) {
                 }
             }
             state.history_index = state.history.size();
+        }
+    } catch (...) {
+        // Ignore load errors
+    }
+}
+
+void save_registered_commands(const ShellState& state) {
+    try {
+        fs::path commands_path = state.shell_directory / ".jshell_commands";
+        std::ofstream file(commands_path);
+        if (file) {
+            for (const auto& [name, cmd] : state.registered_commands) {
+                file << name << "|" << cmd.template_cmd << "|" << cmd.description << '\n';
+            }
+        }
+    } catch (...) {
+        // Ignore save errors
+    }
+}
+
+void load_registered_commands(ShellState& state) {
+    try {
+        fs::path commands_path = state.shell_directory / ".jshell_commands";
+        if (fs::exists(commands_path)) {
+            std::ifstream file(commands_path);
+            std::string line;
+            while (std::getline(file, line)) {
+                if (line.empty()) continue;
+                
+                auto first_pipe = line.find('|');
+                auto second_pipe = line.find('|', first_pipe + 1);
+                
+                if (first_pipe != std::string::npos && second_pipe != std::string::npos) {
+                    std::string name = line.substr(0, first_pipe);
+                    std::string template_cmd = line.substr(first_pipe + 1, second_pipe - first_pipe - 1);
+                    std::string description = line.substr(second_pipe + 1);
+                    
+                    RegisteredCommand reg_cmd(name, template_cmd, description);
+                    
+                    // Parse template to find parameters
+                    std::regex param_regex(R"(\{([^}]+)\})");
+                    std::sregex_iterator iter(template_cmd.begin(), template_cmd.end(), param_regex);
+                    std::sregex_iterator end;
+                    
+                    for (; iter != end; ++iter) {
+                        std::string param = (*iter)[1].str();
+                        if (!param.empty() && param != "all" && !std::isdigit(param[0])) {
+                            reg_cmd.param_names.push_back(param);
+                        }
+                    }
+                    
+                    state.registered_commands[name] = reg_cmd;
+                }
+            }
         }
     } catch (...) {
         // Ignore load errors
@@ -985,20 +1062,31 @@ int launch_process(Command& cmd, HANDLE hInput, HANDLE hOutput, HANDLE hError, S
 // Forward declare execute function
 int execute(ShellState& state, std::vector<Command>& commands);
 
-// --- Built-in Command Implementations ---
-// (All implementations from before are here, they are correct)
-int cd(ShellState&, std::span<const char*> args) {
+int cd(ShellState& state, std::span<const char*> args) {
     std::string target_dir;
     
     if (args.size() < 2) {
+        target_dir = get_home_directory();
+    } else if(args.size() < 2) {
         target_dir = get_home_directory();
     } else {
         std::string arg = args[1];
         if (arg == "~") {
             target_dir = get_home_directory();
         } else if (arg == "-") {
-            // TODO: Implement previous directory tracking
-            target_dir = get_home_directory();
+            // Implement previous directory tracking
+            if (state.previous_directory.empty()) {
+                const Theme theme;
+                ColorGuard guard(theme.warning_color);
+                std::cerr << "jshell: cd: OLDPWD not set\n";
+                return 1;
+            }
+            target_dir = state.previous_directory;
+            
+            // Show where we're going (like bash does)
+            const Theme theme;
+            ColorGuard guard(theme.success_color);
+            std::cout << target_dir << '\n';
         } else {
             target_dir = expand_path(arg);
         }
@@ -1012,7 +1100,17 @@ int cd(ShellState&, std::span<const char*> args) {
     }
     
     try {
+        // Store current directory as previous before changing
+        std::string current_dir = fs::current_path().string();
+        
+        // Change to target directory
         fs::current_path(target_dir);
+        
+        // Update previous directory (but not if we're going to the same place)
+        if (current_dir != fs::current_path().string()) {
+            state.previous_directory = current_dir;
+        }
+        
         return 0;
     } catch (const fs::filesystem_error& e) {
         const Theme theme;
@@ -1021,7 +1119,6 @@ int cd(ShellState&, std::span<const char*> args) {
         return 1;
     }
 }
-
 int help(ShellState&, std::span<const char*> args) {
     const Theme theme;
     
@@ -2551,6 +2648,196 @@ int vi(ShellState& state, std::span<const char*> args) {
     return 0;
 }
 
+std::string expand_registered_command(const RegisteredCommand& reg_cmd, const std::vector<std::string>& args) {
+    std::string result = reg_cmd.template_cmd;
+    
+    // Replace positional parameters {0}, {1}, {2}, etc.
+    for (size_t i = 0; i < args.size(); ++i) {
+        std::string placeholder = std::format("{{{}}}", i);
+        size_t pos = 0;
+        while ((pos = result.find(placeholder, pos)) != std::string::npos) {
+            result.replace(pos, placeholder.length(), args[i]);
+            pos += args[i].length();
+        }
+    }
+    
+    // Replace named parameters {file}, {output}, etc.
+    for (const auto& param : reg_cmd.param_names) {
+        std::string placeholder = std::format("{{{}}}", param);
+        size_t pos = 0;
+        while ((pos = result.find(placeholder, pos)) != std::string::npos) {
+            // Find corresponding argument or use default
+            std::string value;
+            auto it = reg_cmd.default_values.find(param);
+            if (it != reg_cmd.default_values.end()) {
+                value = it->second;
+            }
+            result.replace(pos, placeholder.length(), value);
+            pos += value.length();
+        }
+    }
+    
+    // Replace special placeholders
+    result = std::regex_replace(result, std::regex(R"(\{all\})"), 
+        [&args]() {
+            std::string all_args;
+            for (size_t i = 0; i < args.size(); ++i) {
+                if (i > 0) all_args += " ";
+                all_args += args[i];
+            }
+            return all_args;
+        }());
+    
+    return result;
+}
+
+int register_cmd(ShellState& state, std::span<const char*> args) {
+    if (args.size() < 3) {
+        const Theme theme;
+        ColorGuard guard(theme.error_color);
+        std::cerr << "jshell: Usage: register <name> <template> [description]\n";
+        std::cerr << "\nTemplate placeholders:\n";
+        std::cerr << "  {0}, {1}, {2}... - Positional arguments\n";
+        std::cerr << "  {all}           - All arguments\n";
+        std::cerr << "  {file}          - Named parameter\n";
+        std::cerr << "\nExamples:\n";
+        std::cerr << "  register cpp \"g++ -std=c++20 {0} -o {1}\" \"Compile C++ file\"\n";
+        std::cerr << "  register run \"./{0}\" \"Run executable\"\n";
+        std::cerr << "  register backup \"cp {0} {0}.bak\" \"Backup file\"\n";
+        std::cerr << "\nNote: Use quotes around templates with spaces!\n";
+        return 1;
+    }
+    
+    std::string name = args[1];
+    std::string template_cmd = args[2];
+    std::string description = args.size() > 3 ? args[3] : "Custom registered command";
+    
+    // Remove surrounding brackets if present (fix for parsing issue)
+    if (template_cmd.starts_with('[') && template_cmd.ends_with(']')) {
+        template_cmd = template_cmd.substr(1, template_cmd.length() - 2);
+    }
+    
+    // Check if it conflicts with existing builtins
+    for (const auto& builtin : builtins) {
+        if (builtin.name == name) {
+            const Theme theme;
+            ColorGuard guard(theme.error_color);
+            std::cerr << std::format("jshell: Cannot register '{}' - conflicts with builtin command\n", name);
+            return 1;
+        }
+    }
+    
+    // Check if command already exists and ask for confirmation
+    if (state.registered_commands.contains(name)) {
+        const Theme theme;
+        ColorGuard guard(theme.warning_color);
+        std::cout << std::format("Command '{}' already exists. Overwrite? (y/n): ", name);
+        std::string confirm;
+        if (!std::getline(std::cin, confirm) || std::tolower(confirm[0]) != 'y') {
+            std::cout << "Registration cancelled.\n";
+            return 0;
+        }
+    }
+    
+    RegisteredCommand reg_cmd(name, template_cmd, description);
+    
+    // Parse template to find parameters
+    std::regex param_regex(R"(\{([^}]+)\})");
+    std::sregex_iterator iter(template_cmd.begin(), template_cmd.end(), param_regex);
+    std::sregex_iterator end;
+    
+    for (; iter != end; ++iter) {
+        std::string param = (*iter)[1].str();
+        if (!param.empty() && param != "all" && !std::isdigit(param[0])) {
+            reg_cmd.param_names.push_back(param);
+        }
+    }
+    
+    state.registered_commands[name] = reg_cmd;
+    save_registered_commands(state);  // Save to file
+    
+    const Theme theme;
+    ColorGuard guard(theme.success_color);
+    std::cout << std::format("Registered command '{}': {}\n", name, template_cmd);
+    if (!reg_cmd.param_names.empty()) {
+        std::cout << "Parameters: ";
+        for (size_t i = 0; i < reg_cmd.param_names.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << reg_cmd.param_names[i];
+        }
+        std::cout << '\n';
+    }
+    
+    return 0;
+}
+
+int unregister_cmd(ShellState& state, std::span<const char*> args) {
+    if (args.size() < 2) {
+        const Theme theme;
+        ColorGuard guard(theme.error_color);
+        std::cerr << "jshell: Usage: unreg <name>\n";
+        return 1;
+    }
+    
+    std::string name = args[1];
+    
+    if (state.registered_commands.erase(name) > 0) {
+        save_registered_commands(state);  // Save to file
+        const Theme theme;
+        ColorGuard guard(theme.success_color);
+        std::cout << std::format("Unregistered command '{}'\n", name);
+        return 0;
+    } else {
+        const Theme theme;
+        ColorGuard guard(theme.error_color);
+        std::cerr << std::format("jshell: Command '{}' not found\n", name);
+        return 1;
+    }
+}
+
+int list_registered(ShellState& state, std::span<const char*>) {
+    const Theme theme;
+    
+    if (state.registered_commands.empty()) {
+        ColorGuard guard(theme.warning_color);
+        std::cout << "No registered commands.\n";
+        std::cout << "\nTry registering some commands:\n";
+        std::cout << "  register cpp \"g++ -std=c++20 {0} -o {1}\" \"Compile C++\"\n";
+        std::cout << "  register py \"python {0}\" \"Run Python script\"\n";
+        std::cout << "  register backup \"cp {0} {0}.bak\" \"Backup file\"\n";
+        return 0;
+    }
+    
+    ColorGuard header_guard(theme.prompt_color);
+    std::cout << "Registered Commands:\n";
+    std::cout << std::string(50, '=') << '\n';
+    
+    SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
+    
+    for (const auto& [name, cmd] : state.registered_commands) {
+        ColorGuard name_guard(theme.help_command_color);
+        std::cout << std::format("{:<12}", name);
+        
+        SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
+        std::cout << std::format(" - {}\n", cmd.description);
+        std::cout << std::format("             Template: {}\n", cmd.template_cmd);
+        
+        if (!cmd.param_names.empty()) {
+            std::cout << "             Parameters: ";
+            for (size_t i = 0; i < cmd.param_names.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                ColorGuard param_guard(theme.success_color);
+                std::cout << cmd.param_names[i];
+            }
+            SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), theme.default_color);
+            std::cout << '\n';
+        }
+        std::cout << '\n';
+    }
+    
+    return 0;
+}
+
 int version(ShellState&, std::span<const char*>) {
     const Theme theme;
     ColorGuard header_guard(theme.prompt_color);
@@ -2572,6 +2859,8 @@ int execute(ShellState& state, std::vector<Command>& commands) {
     }
 
     std::string cmd_name = commands[0].args[0];
+    
+    // Handle aliases first
     if (state.aliases.contains(cmd_name)) {
         std::string alias_cmd = state.aliases[cmd_name];
         std::vector<std::string> original_args(commands[0].args.begin() + 1, commands[0].args.end());
@@ -2579,6 +2868,21 @@ int execute(ShellState& state, std::vector<Command>& commands) {
         auto alias_tokens = tokenize(alias_cmd);
         commands[0].args = alias_tokens;
         commands[0].args.insert(commands[0].args.end(), original_args.begin(), original_args.end());
+        cmd_name = commands[0].args[0]; // Update cmd_name after alias expansion
+    }
+    
+    // Handle registered commands
+    if (state.registered_commands.contains(cmd_name)) {
+        const auto& reg_cmd = state.registered_commands[cmd_name];
+        std::vector<std::string> cmd_args(commands[0].args.begin() + 1, commands[0].args.end());
+        
+        std::string expanded_cmd = expand_registered_command(reg_cmd, cmd_args);
+        
+        // Parse the expanded command and execute it
+        auto expanded_commands = parse_pipeline(expanded_cmd, state);
+        if (!expanded_commands.empty()) {
+            return execute(state, expanded_commands);
+        }
     }
 
     if (commands.size() == 1) {
@@ -2681,6 +2985,44 @@ void load_config(ShellState& state) {
 void initialize_shell(ShellState& state) {
     load_config(state);
     load_history(state);
+    load_registered_commands(state);
+    
+    // Register some useful default commands
+    state.registered_commands["cpp"] = RegisteredCommand("cpp", 
+        "g++ -std=c++20 -Wall -Wextra {0} -o {1}", 
+        "Compile C++ file with modern standards");
+    
+    state.registered_commands["cpprun"] = RegisteredCommand("cpprun", 
+        "g++ -std=c++20 -Wall -Wextra {0} -o temp_exe && temp_exe && del temp_exe.exe", 
+        "Compile and run C++ file");
+    
+    state.registered_commands["py"] = RegisteredCommand("py", 
+        "python {0}", 
+        "Run Python script");
+    
+    state.registered_commands["node"] = RegisteredCommand("node", 
+        "node {0}", 
+        "Run Node.js script");
+    
+    state.registered_commands["backup"] = RegisteredCommand("backup", 
+        "cp {0} {0}.bak", 
+        "Create backup of file");
+    
+    state.registered_commands["restore"] = RegisteredCommand("restore", 
+        "cp {0}.bak {0}", 
+        "Restore file from backup");
+    
+    state.registered_commands["mkexe"] = RegisteredCommand("mkexe", 
+        "chmod +x {0}", 
+        "Make file executable");
+    
+    state.registered_commands["webget"] = RegisteredCommand("webget", 
+        "curl -O {0}", 
+        "Download file from URL");
+    
+    state.registered_commands["extract"] = RegisteredCommand("extract", 
+        "tar -xzf {0}", 
+        "Extract tar.gz archive");
     
     fs::path rc_file = state.shell_directory / ".jshellrc";
     if (fs::exists(rc_file)) {
@@ -2721,7 +3063,7 @@ void shell_loop() {
         std::cout << "    Built with caffeine & C++ by Camresh - CNJMTechnologies INC\n";
         
         ColorGuard feature_guard(theme.help_command_color);
-        std::cout << "\n  <Features: Job Control | Pipes | Redirection | Vi Editor >\n";
+        std::cout << "\nFeatures: Job Control | Pipes | Redirection | Vi Editor\n";
     } else {
         std::cout << R"(
    __        _            _  _ 
